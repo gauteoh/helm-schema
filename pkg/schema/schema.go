@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -224,6 +226,7 @@ type Schema struct {
 	Then                 *Schema                `yaml:"then,omitempty"                 json:"then,omitempty"`
 	PatternProperties    map[string]*Schema     `yaml:"patternProperties,omitempty"    json:"patternProperties,omitempty"`
 	Properties           map[string]*Schema     `yaml:"properties,omitempty"           json:"properties,omitempty"`
+	Definitions          map[string]*Schema     `yaml:"definitions,omitempty"          json:"definitions,omitempty"`
 	If                   *Schema                `yaml:"if,omitempty"                   json:"if,omitempty"`
 	Minimum              *int                   `yaml:"minimum,omitempty"              json:"minimum,omitempty"`
 	MultipleOf           *int                   `yaml:"multipleOf,omitempty"           json:"multipleOf,omitempty"`
@@ -387,6 +390,13 @@ func (s *Schema) DisableRequiredProperties() {
 			s.AdditionalProperties = subSchema
 		}
 	}
+
+	// Handle definitions
+	if s.Definitions != nil {
+		for _, defSchema := range s.Definitions {
+			defSchema.DisableRequiredProperties()
+		}
+	}
 }
 
 // ToJson converts the data to raw json
@@ -396,6 +406,169 @@ func (s Schema) ToJson() ([]byte, error) {
 		return nil, err
 	}
 	return res, nil
+}
+
+// Equals compares two Schema objects for semantic equality
+func (s *Schema) Equals(other *Schema) bool {
+	if s == nil && other == nil {
+		return true
+	}
+	if s == nil || other == nil {
+		return false
+	}
+
+	// Compare structural fields only (ignore descriptive fields like description, title)
+	if s.Pattern != other.Pattern ||
+		s.Format != other.Format ||
+		s.Deprecated != other.Deprecated ||
+		s.ReadOnly != other.ReadOnly ||
+		s.WriteOnly != other.WriteOnly ||
+		s.UniqueItems != other.UniqueItems ||
+		s.Ref != other.Ref {
+		return false
+	}
+
+	// Compare Type arrays
+	if len(s.Type) != len(other.Type) {
+		return false
+	}
+	for i, t := range s.Type {
+		if t != other.Type[i] {
+			return false
+		}
+	}
+
+	// Compare pointer fields
+	if !equalIntPtr(s.Minimum, other.Minimum) ||
+		!equalIntPtr(s.Maximum, other.Maximum) ||
+		!equalIntPtr(s.ExclusiveMinimum, other.ExclusiveMinimum) ||
+		!equalIntPtr(s.ExclusiveMaximum, other.ExclusiveMaximum) ||
+		!equalIntPtr(s.MultipleOf, other.MultipleOf) ||
+		!equalIntPtr(s.MinLength, other.MinLength) ||
+		!equalIntPtr(s.MaxLength, other.MaxLength) ||
+		!equalIntPtr(s.MinItems, other.MinItems) ||
+		!equalIntPtr(s.MaxItems, other.MaxItems) {
+		return false
+	}
+
+	// Compare Default values
+	if !reflect.DeepEqual(s.Default, other.Default) ||
+		!reflect.DeepEqual(s.Const, other.Const) {
+		return false
+	}
+
+	// Compare arrays
+	if !equalStringSlice(s.Enum, other.Enum) ||
+		!equalStringSlice(s.Examples, other.Examples) {
+		return false
+	}
+
+	// Compare nested schemas
+	if !s.equalNestedSchemas(other) {
+		return false
+	}
+
+	return true
+}
+
+// Helper function to compare int pointers
+func equalIntPtr(a, b *int) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// Helper function to compare string slices
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Helper function to compare nested schemas
+func (s *Schema) equalNestedSchemas(other *Schema) bool {
+	// Compare Properties maps
+	if len(s.Properties) != len(other.Properties) {
+		return false
+	}
+	for key, schema := range s.Properties {
+		otherSchema, exists := other.Properties[key]
+		if !exists || !schema.Equals(otherSchema) {
+			return false
+		}
+	}
+
+	// Compare Definitions maps
+	if len(s.Definitions) != len(other.Definitions) {
+		return false
+	}
+	for key, schema := range s.Definitions {
+		otherSchema, exists := other.Definitions[key]
+		if !exists || !schema.Equals(otherSchema) {
+			return false
+		}
+	}
+
+	// Compare PatternProperties maps
+	if len(s.PatternProperties) != len(other.PatternProperties) {
+		return false
+	}
+	for key, schema := range s.PatternProperties {
+		otherSchema, exists := other.PatternProperties[key]
+		if !exists || !schema.Equals(otherSchema) {
+			return false
+		}
+	}
+
+	// Compare single nested schemas
+	if !s.equalSingleSchema(s.Items, other.Items) ||
+		!s.equalSingleSchema(s.If, other.If) ||
+		!s.equalSingleSchema(s.Then, other.Then) ||
+		!s.equalSingleSchema(s.Else, other.Else) ||
+		!s.equalSingleSchema(s.Not, other.Not) {
+		return false
+	}
+
+	// Compare schema arrays
+	if !s.equalSchemaSlice(s.AnyOf, other.AnyOf) ||
+		!s.equalSchemaSlice(s.AllOf, other.AllOf) ||
+		!s.equalSchemaSlice(s.OneOf, other.OneOf) {
+		return false
+	}
+
+	return true
+}
+
+func (s *Schema) equalSingleSchema(a, b *Schema) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Equals(b)
+}
+
+func (s *Schema) equalSchemaSlice(a, b []*Schema) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, schema := range a {
+		if !schema.Equals(b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // Supported format values according to JSON Schema specification
@@ -587,6 +760,15 @@ func (s Schema) validateNestedSchemas() error {
 		}
 	}
 
+	// Validate definitions
+	if s.Definitions != nil {
+		for _, defSchema := range s.Definitions {
+			if err := defSchema.Validate(); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -720,6 +902,12 @@ func FixRequiredProperties(schema *Schema) error {
 		FixRequiredProperties(schema.Not)
 	}
 
+	if schema.Definitions != nil {
+		for _, defSchema := range schema.Definitions {
+			FixRequiredProperties(defSchema)
+		}
+	}
+
 	return nil
 }
 
@@ -775,10 +963,32 @@ func YamlToSchema(
 	helmDocsCompatibilityMode bool,
 	dontRemoveHelmDocsPrefix bool,
 	dontAddGlobal bool,
+	resolve bool,
 	skipAutoGeneration *SkipAutoGenerationConfig,
 	parentRequiredProperties *[]string,
-) *Schema {
+) (*Schema, error) {
+	return yamlToSchemaWithRoot(valuesPath, node, keepFullComment, helmDocsCompatibilityMode, dontRemoveHelmDocsPrefix, dontAddGlobal, resolve, skipAutoGeneration, parentRequiredProperties, nil)
+}
+
+// yamlToSchemaWithRoot is the internal implementation that also tracks the root schema for definitions
+func yamlToSchemaWithRoot(
+	valuesPath string,
+	node *yaml.Node,
+	keepFullComment bool,
+	helmDocsCompatibilityMode bool,
+	dontRemoveHelmDocsPrefix bool,
+	dontAddGlobal bool,
+	resolve bool,
+	skipAutoGeneration *SkipAutoGenerationConfig,
+	parentRequiredProperties *[]string,
+	rootSchema *Schema,
+) (*Schema, error) {
 	schema := NewSchema("object")
+
+	// Set root schema for definitions tracking
+	if rootSchema == nil {
+		rootSchema = schema
+	}
 
 	switch node.Kind {
 	case yaml.DocumentNode:
@@ -787,16 +997,22 @@ func YamlToSchema(
 		}
 
 		schema.Schema = "http://json-schema.org/draft-07/schema#"
-		schema.Properties = YamlToSchema(
+		contentSchema, err := yamlToSchemaWithRoot(
 			valuesPath,
 			node.Content[0],
 			keepFullComment,
 			helmDocsCompatibilityMode,
 			dontRemoveHelmDocsPrefix,
 			dontAddGlobal,
+			resolve,
 			skipAutoGeneration,
 			&schema.Required.Strings,
-		).Properties
+			rootSchema,
+		)
+		if err != nil {
+			return nil, err
+		}
+		schema.Properties = contentSchema.Properties
 
 		if _, ok := schema.Properties["global"]; !ok && !dontAddGlobal {
 			// global key must be present, otherwise helm lint will fail
@@ -871,7 +1087,28 @@ func YamlToSchema(
 
 			if keyNodeSchema.Ref != "" || len(keyNodeSchema.PatternProperties) > 0 {
 				// Handle $ref in main schema and pattern properties
-				handleSchemaRefs(&keyNodeSchema, valuesPath)
+				handleSchemaRefs(&keyNodeSchema, valuesPath, resolve, rootSchema)
+
+				// If this schema has definitions, merge them into the root schema with conflict detection
+				if keyNodeSchema.Definitions != nil {
+					if rootSchema.Definitions == nil {
+						rootSchema.Definitions = make(map[string]*Schema)
+					}
+					for defName, newDefSchema := range keyNodeSchema.Definitions {
+						if existingDefSchema, exists := rootSchema.Definitions[defName]; exists {
+							// Check if definitions conflict
+							if !existingDefSchema.Equals(newDefSchema) {
+								return nil, fmt.Errorf("definition conflict: '%s' has different definitions in multiple schema files", defName)
+							}
+							// Same definition - allow reuse, no action needed
+						} else {
+							// New definition - add it
+							rootSchema.Definitions[defName] = newDefSchema
+						}
+					}
+					// Clear definitions from this local schema since they're now in the root
+					keyNodeSchema.Definitions = nil
+				}
 			}
 
 			if keyNodeSchema.HasData {
@@ -927,16 +1164,22 @@ func YamlToSchema(
 						keyNodeSchema.Properties = make(map[string]*Schema)
 					}
 
-					generatedProperties := YamlToSchema(
+					generatedPropsSchema, err := yamlToSchemaWithRoot(
 						valuesPath,
 						valueNode,
 						keepFullComment,
 						helmDocsCompatibilityMode,
 						dontRemoveHelmDocsPrefix,
 						dontAddGlobal,
+						resolve,
 						skipAutoGeneration,
 						&keyNodeSchema.Required.Strings,
-					).Properties
+						rootSchema,
+					)
+					if err != nil {
+						return nil, err
+					}
+					generatedProperties := generatedPropsSchema.Properties
 
 					// Process each property
 					for i := 0; i < len(valueNode.Content); i += 2 {
@@ -974,7 +1217,10 @@ func YamlToSchema(
 							seqSchema.AnyOf = append(seqSchema.AnyOf, NewSchema(itemNodeType[0]))
 						} else {
 							itemRequiredProperties := []string{}
-							itemSchema := YamlToSchema(valuesPath, itemNode, keepFullComment, helmDocsCompatibilityMode, dontRemoveHelmDocsPrefix, dontAddGlobal, skipAutoGeneration, &itemRequiredProperties)
+							itemSchema, err := yamlToSchemaWithRoot(valuesPath, itemNode, keepFullComment, helmDocsCompatibilityMode, dontRemoveHelmDocsPrefix, dontAddGlobal, resolve, skipAutoGeneration, &itemRequiredProperties, rootSchema)
+							if err != nil {
+								return nil, err
+							}
 
 							itemSchema.Required.Strings = append(itemSchema.Required.Strings, itemRequiredProperties...)
 
@@ -1000,7 +1246,7 @@ func YamlToSchema(
 		}
 	}
 
-	return schema
+	return schema, nil
 }
 
 func helmDocsTypeToSchemaType(helmDocsType string) (string, error) {
@@ -1076,21 +1322,353 @@ func castNodeValueByType(rawValue string, fieldType StringOrArrayOfString) any {
 //
 // The function will log.Fatal on any critical errors (file not found, invalid JSON, etc.)
 // and log.Debug for non-critical issues (e.g., non-relative paths that may be handled elsewhere)
-func handleSchemaRefs(schema *Schema, valuesPath string) {
+
+func handleSchemaRefs(schema *Schema, valuesPath string, resolve bool, rootSchema *Schema) {
+	visited := make(map[string]bool)
+	handleSchemaRefsRecursive(schema, valuesPath, resolve, rootSchema, visited)
+}
+
+// func handleSchemaRefs(schema *Schema, valuesPath string) {
+// 	// Handle main schema $ref
+// 	if schema.Ref != "" {
+// 		refParts := strings.Split(schema.Ref, "#")
+// 		if relFilePath, err := util.IsRelativeFile(valuesPath, refParts[0]); err == nil {
+// 			var relSchema Schema
+// 			file, err := os.Open(relFilePath)
+// 			if err == nil {
+// 				defer file.Close()
+// 				byteValue, _ := io.ReadAll(file)
+//
+// 				if len(refParts) > 1 {
+// 					// Found json-pointer
+// 					var obj interface{}
+// 					json.Unmarshal(byteValue, &obj)
+// 					jsonPointerResultRaw, err := jsonpointer.Get(obj, refParts[1])
+// 					if err != nil {
+// 						log.Fatal(err)
+// 					}
+// 					jsonPointerResultMarshaled, err := json.Marshal(jsonPointerResultRaw)
+// 					if err != nil {
+// 						log.Fatal(err)
+// 					}
+// 					err = json.Unmarshal(jsonPointerResultMarshaled, &relSchema)
+// 					if err != nil {
+// 						log.Fatal(err)
+// 					}
+// 				} else {
+// 					// No json-pointer
+// 					err = json.Unmarshal(byteValue, &relSchema)
+// 					if err != nil {
+// 						log.Fatal(err)
+// 					}
+// 				}
+// 				*schema = relSchema
+// 				schema.HasData = true
+// 			} else {
+// 				log.Fatal(err)
+// 			}
+// 		} else {
+// 			log.Debug(err)
+// 		}
+// 	}
+//
+// 	// Handle $ref in pattern properties
+// 	if schema.PatternProperties != nil {
+// 		for pattern, subSchema := range schema.PatternProperties {
+// 			if subSchema.Ref != "" {
+// 				handleSchemaRefs(subSchema, valuesPath)
+// 				schema.PatternProperties[pattern] = subSchema // Update the original schema in the map
+// 			}
+// 		}
+// 	}
+// }
+
+// isURL checks if the given string is a valid HTTP/HTTPS URL
+func isURL(s string) bool {
+	parsedURL, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return parsedURL.Scheme == "http" || parsedURL.Scheme == "https"
+}
+
+// downloadedSchemas caches downloaded schema files by base URL to avoid duplicate downloads
+var downloadedSchemas = make(map[string]*Schema)
+
+// handleURLRef downloads and processes external URL references, placing them in definitions
+func handleURLRef(schema *Schema, refParts []string, visited map[string]bool, rootSchema *Schema) {
+	// Mark this reference as being processed
+	visited[schema.Ref] = true
+
+	baseURL := refParts[0]
+	jsonPointer := ""
+	if len(refParts) > 1 {
+		jsonPointer = refParts[1]
+	}
+
+	log.Debugf("Processing URL reference: baseURL=%s, jsonPointer=%s", baseURL, jsonPointer)
+
+	// Check if we already downloaded this base URL
+	var downloadedSchema *Schema
+	var exists bool
+	if downloadedSchema, exists = downloadedSchemas[baseURL]; !exists {
+		// Download the schema from URL
+		log.Debugf("Downloading schema from URL: %s", baseURL)
+		resp, err := http.Get(baseURL)
+		if err != nil {
+			log.Errorf("Failed to download schema from %s: %v", baseURL, err)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Errorf("Failed to download schema from %s: HTTP %d", baseURL, resp.StatusCode)
+			return
+		}
+
+		byteValue, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Errorf("Failed to read schema response from %s: %v", baseURL, err)
+			return
+		}
+
+		// Load the entire schema to capture definitions
+		var baseSchema Schema
+		err = json.Unmarshal(byteValue, &baseSchema)
+		if err != nil {
+			log.Errorf("Failed to parse schema from %s: %v", baseURL, err)
+			return
+		}
+
+		// Cache the downloaded schema
+		downloadedSchemas[baseURL] = &baseSchema
+		downloadedSchema = &baseSchema
+
+		// Recursively resolve any nested HTTPS refs in the downloaded schema
+		log.Debugf("Recursively resolving nested refs in downloaded schema from %s", baseURL)
+		handleSchemaRefsRecursive(downloadedSchema, baseURL, true, rootSchema, visited)
+	} else {
+		log.Debugf("Using cached schema for URL: %s", baseURL)
+	}
+
+	var schemaToStore *Schema
+	var defName string
+
+	if jsonPointer != "" {
+		// Extract the specific definition using JSON pointer
+		log.Debugf("Extracting JSON pointer %s from cached schema", jsonPointer)
+
+		// Convert the downloaded schema back to JSON to use jsonpointer library
+		schemaBytes, err := json.Marshal(downloadedSchema)
+		if err != nil {
+			log.Errorf("Failed to marshal cached schema: %v", err)
+			return
+		}
+
+		var obj interface{}
+		json.Unmarshal(schemaBytes, &obj)
+
+		// Get the specific part referenced by the JSON pointer
+		jsonPointerResultRaw, err := jsonpointer.Get(obj, jsonPointer)
+		if err != nil {
+			log.Errorf("Failed to resolve JSON pointer %s in schema from %s: %v", jsonPointer, baseURL, err)
+			return
+		}
+
+		jsonPointerResultMarshaled, err := json.Marshal(jsonPointerResultRaw)
+		if err != nil {
+			log.Errorf("Failed to marshal JSON pointer result: %v", err)
+			return
+		}
+
+		var pointedSchema Schema
+		err = json.Unmarshal(jsonPointerResultMarshaled, &pointedSchema)
+		if err != nil {
+			log.Errorf("Failed to unmarshal pointed schema: %v", err)
+			return
+		}
+
+		// Recursively resolve nested refs in the pointed schema
+		handleSchemaRefsRecursive(&pointedSchema, baseURL, true, rootSchema, visited)
+
+		schemaToStore = &pointedSchema
+
+		// Use the JSON pointer path as the definition name (e.g., "/definitions/io.k8s.api.core.v1.Capabilities" -> "io.k8s.api.core.v1.Capabilities")
+		if strings.HasPrefix(jsonPointer, "/definitions/") {
+			defName = strings.TrimPrefix(jsonPointer, "/definitions/")
+		} else {
+			// Fallback: generate name from the pointer path
+			defName = strings.ReplaceAll(strings.Trim(jsonPointer, "/"), "/", "_")
+		}
+	} else {
+		// No JSON pointer, use the whole schema
+		schemaToStore = downloadedSchema
+		defName = generateDefinitionName(baseURL)
+	}
+
+	// Add the schema to definitions with conflict detection
+	if rootSchema.Definitions == nil {
+		rootSchema.Definitions = make(map[string]*Schema)
+	}
+
+	if existingDef, exists := rootSchema.Definitions[defName]; exists {
+		// Check if definitions conflict
+		if !existingDef.Equals(schemaToStore) {
+			log.Warnf("Definition conflict for '%s' from URL %s - using existing definition", defName, schema.Ref)
+		}
+		// Use existing definition
+	} else {
+		// Add new definition
+		log.Debugf("Adding definition '%s' to root schema", defName)
+		rootSchema.Definitions[defName] = schemaToStore
+
+		// Special handling for _definitions.json files: add ALL definitions from the file
+		// to prevent missing transitive dependencies
+		if strings.Contains(baseURL, "_definitions.json") && downloadedSchema != nil && downloadedSchema.Definitions != nil {
+			log.Debugf("Adding all definitions from %s to root schema", baseURL)
+			for allDefName, allDefSchema := range downloadedSchema.Definitions {
+				if _, exists := rootSchema.Definitions[allDefName]; !exists {
+					log.Debugf("Adding additional definition '%s' from %s", allDefName, baseURL)
+					rootSchema.Definitions[allDefName] = allDefSchema
+				}
+			}
+		}
+	}
+
+	// Convert the external reference to an internal reference
+	schema.Ref = "#/definitions/" + defName
+	schema.HasData = true
+}
+
+// generateDefinitionName creates a definition name from a URL
+func generateDefinitionName(refURL string) string {
+	// Remove protocol and special characters, create a valid definition name
+	name := strings.ReplaceAll(refURL, "https://", "")
+	name = strings.ReplaceAll(name, "http://", "")
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, ".", "_")
+	name = strings.ReplaceAll(name, "-", "_")
+	name = strings.ReplaceAll(name, "#", "_")
+	name = strings.ReplaceAll(name, ":", "_")
+
+	// Ensure it starts with a letter (prepend if needed)
+	if len(name) > 0 && (name[0] < 'A' || (name[0] > 'Z' && name[0] < 'a') || name[0] > 'z') {
+		name = "def_" + name
+	}
+
+	return name
+}
+
+func handleSchemaRefsRecursive(schema *Schema, valuesPath string, resolve bool, rootSchema *Schema, visited map[string]bool) {
+	if schema == nil {
+		return
+	}
+
+	// Only apply context-based recursion protection for file references, not HTTP references
+	// to avoid preventing legitimate processing of external schema definitions
+	if !isURL(valuesPath) {
+		contextKey := fmt.Sprintf("CONTEXT:%s:%p", valuesPath, schema)
+		if visited[contextKey] {
+			log.Debugf("Schema context already processed, skipping: %s", contextKey)
+			return
+		}
+		visited[contextKey] = true
+	}
+
+	log.Debugf("handleSchemaRefsRecursive: processing schema with valuesPath=%s, resolve=%v, hasRef=%v, hasProperties=%v", valuesPath, resolve, schema.Ref != "", schema.Properties != nil)
+
 	// Handle main schema $ref
 	if schema.Ref != "" {
+		log.Debugf("handleSchemaRefsRecursive: found $ref=%s", schema.Ref)
+
+		// Check if we've already processed this reference to prevent infinite recursion
+		if visited[schema.Ref] {
+			log.Debug("Circular reference detected, skipping:", schema.Ref)
+			return
+		}
+
 		refParts := strings.Split(schema.Ref, "#")
+
+		// Handle internal references like #/definitions/... by looking them up in the root schema
+		if refParts[0] == "" && len(refParts) > 1 && strings.HasPrefix(refParts[1], "/definitions/") {
+			definitionName := strings.TrimPrefix(refParts[1], "/definitions/")
+			if rootSchema.Definitions != nil {
+				if definition, exists := rootSchema.Definitions[definitionName]; exists {
+					log.Debugf("Found internal definition reference: %s", definitionName)
+					// Replace the current schema with the referenced definition
+					*schema = *definition
+					schema.HasData = true
+					return
+				} else {
+					log.Debugf("Internal definition not found in root schema: %s", definitionName)
+				}
+			}
+			// If definition not found, continue with normal processing (might be resolved later)
+		}
+
+		// Check if it's a URL and resolve is enabled - prioritize this over file resolution
+		if resolve && isURL(refParts[0]) {
+			log.Debugf("handleSchemaRefsRecursive: resolving URL ref=%s", schema.Ref)
+			handleURLRef(schema, refParts, visited, rootSchema)
+			return
+		}
+
+		// Try relative file resolution
 		if relFilePath, err := util.IsRelativeFile(valuesPath, refParts[0]); err == nil {
-			var relSchema Schema
+			// Mark this reference as being processed
+			visited[schema.Ref] = true
+
+			// Also mark the file path as visited to prevent recursive processing of the same file
+			fileKey := "FILE:" + relFilePath
+			if visited[fileKey] {
+				log.Debugf("File already processed, skipping: %s", relFilePath)
+				return
+			}
+			visited[fileKey] = true
+
 			file, err := os.Open(relFilePath)
 			if err == nil {
 				defer file.Close()
 				byteValue, _ := io.ReadAll(file)
 
+				// Load the entire schema to capture definitions
+				var fullSchema Schema
+				err = json.Unmarshal(byteValue, &fullSchema)
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				// Extract the definitions and add them to the root schema's definitions
+				// but keep the $ref as a reference to the internal definition
+				if len(refParts) > 1 {
+					// We have a JSON pointer like schemas/myschema.json#/definitions/fooDefinition
+					jsonPointer := refParts[1]
+
+					// Extract the definition name from the pointer (e.g., "/definitions/fooDefinition" -> "fooDefinition")
+					if strings.HasPrefix(jsonPointer, "/definitions/") {
+						definitionName := strings.TrimPrefix(jsonPointer, "/definitions/")
+
+						// If the full schema has definitions, we need to add them to the root
+						if fullSchema.Definitions != nil {
+							// The definitions will be handled by the calling code that merges them into root
+							schema.Definitions = fullSchema.Definitions
+						}
+
+						// Convert the external reference to an internal reference
+						schema.Ref = "#/definitions/" + definitionName
+						schema.HasData = true
+						return
+					}
+				}
+
+				// Fallback to original behavior for other types of references
+				var relSchema Schema
 				if len(refParts) > 1 {
 					// Found json-pointer
 					var obj interface{}
 					json.Unmarshal(byteValue, &obj)
+
+					// Get the specific referenced part
 					jsonPointerResultRaw, err := jsonpointer.Get(obj, refParts[1])
 					if err != nil {
 						log.Fatal(err)
@@ -1103,15 +1681,31 @@ func handleSchemaRefs(schema *Schema, valuesPath string) {
 					if err != nil {
 						log.Fatal(err)
 					}
+
+					// If the full schema has definitions, preserve them in the resolved schema
+					if fullSchema.Definitions != nil {
+						relSchema.Definitions = fullSchema.Definitions
+					}
 				} else {
 					// No json-pointer
-					err = json.Unmarshal(byteValue, &relSchema)
+					err = json.Unmarshal(byteValue, &fullSchema)
 					if err != nil {
 						log.Fatal(err)
 					}
+					relSchema = fullSchema
 				}
+
+				// Recursively resolve references in the loaded schema
+				// Use the path of the referenced file for relative resolution
+				handleSchemaRefsRecursive(&relSchema, relFilePath, resolve, rootSchema, visited)
+
+				// Replace current schema with resolved schema
 				*schema = relSchema
 				schema.HasData = true
+
+				// Do not continue processing nested schemas after replacing with loaded schema
+				// as they were already processed recursively above
+				return
 			} else {
 				log.Fatal(err)
 			}
@@ -1120,13 +1714,62 @@ func handleSchemaRefs(schema *Schema, valuesPath string) {
 		}
 	}
 
-	// Handle $ref in pattern properties
+	// Recursively process nested schemas in properties
+	if schema.Properties != nil {
+		log.Debugf("Processing %d properties for valuesPath=%s", len(schema.Properties), valuesPath)
+		for propName, propSchema := range schema.Properties {
+			log.Debugf("Processing property %s", propName)
+			handleSchemaRefsRecursive(propSchema, valuesPath, resolve, rootSchema, visited)
+		}
+	}
+
+	// Recursively process nested schemas in definitions
+	if schema.Definitions != nil {
+		for _, defSchema := range schema.Definitions {
+			handleSchemaRefsRecursive(defSchema, valuesPath, resolve, rootSchema, visited)
+		}
+	}
+
+	// Recursively process nested schemas in pattern properties
 	if schema.PatternProperties != nil {
-		for pattern, subSchema := range schema.PatternProperties {
-			if subSchema.Ref != "" {
-				handleSchemaRefs(subSchema, valuesPath)
-				schema.PatternProperties[pattern] = subSchema // Update the original schema in the map
-			}
+		for _, patternSchema := range schema.PatternProperties {
+			handleSchemaRefsRecursive(patternSchema, valuesPath, resolve, rootSchema, visited)
+		}
+	}
+
+	// Recursively process items schema
+	if schema.Items != nil {
+		handleSchemaRefsRecursive(schema.Items, valuesPath, resolve, rootSchema, visited)
+	}
+
+	// Recursively process conditional schemas
+	if schema.If != nil {
+		handleSchemaRefsRecursive(schema.If, valuesPath, resolve, rootSchema, visited)
+	}
+	if schema.Then != nil {
+		handleSchemaRefsRecursive(schema.Then, valuesPath, resolve, rootSchema, visited)
+	}
+	if schema.Else != nil {
+		handleSchemaRefsRecursive(schema.Else, valuesPath, resolve, rootSchema, visited)
+	}
+	if schema.Not != nil {
+		handleSchemaRefsRecursive(schema.Not, valuesPath, resolve, rootSchema, visited)
+	}
+
+	// Recursively process combinatorial schemas
+	if schema.AnyOf != nil {
+		for _, anySchema := range schema.AnyOf {
+			handleSchemaRefsRecursive(anySchema, valuesPath, resolve, rootSchema, visited)
+		}
+	}
+	if schema.AllOf != nil {
+		for _, allSchema := range schema.AllOf {
+			handleSchemaRefsRecursive(allSchema, valuesPath, resolve, rootSchema, visited)
+		}
+	}
+	if schema.OneOf != nil {
+		for _, oneSchema := range schema.OneOf {
+			handleSchemaRefsRecursive(oneSchema, valuesPath, resolve, rootSchema, visited)
 		}
 	}
 }

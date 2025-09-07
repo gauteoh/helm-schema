@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -78,6 +77,7 @@ func exec(cmd *cobra.Command, _ []string) error {
 	dependenciesFilter := viper.GetStringSlice("dependencies-filter")
 	dependenciesFilterMap := make(map[string]bool)
 	dontAddGlobal := viper.GetBool("dont-add-global")
+	resolve := viper.GetBool("resolve")
 	for _, dep := range dependenciesFilter {
 		dependenciesFilterMap[dep] = true
 	}
@@ -87,7 +87,7 @@ func exec(cmd *cobra.Command, _ []string) error {
 	if err := viper.UnmarshalKey("skip-auto-generation", &skipAutoGeneration); err != nil {
 		return err
 	}
-	workersCount := runtime.NumCPU() * 2
+	workersCount := 1
 
 	skipConfig, err := schema.NewSkipAutoGenerationConfig(skipAutoGeneration)
 	if err != nil {
@@ -121,6 +121,7 @@ func exec(cmd *cobra.Command, _ []string) error {
 				helmDocsCompatibilityMode,
 				dontRemoveHelmDocsPrefix,
 				dontAddGlobal,
+				resolve,
 				valueFileNames,
 				skipConfig,
 				outFile,
@@ -246,6 +247,17 @@ loop:
 							Properties:  dependencyResult.Schema.Properties,
 						}
 						depSchema.DisableRequiredProperties()
+
+						// Copy definitions from dependency schema to parent schema
+						if dependencyResult.Schema.Definitions != nil {
+							if result.Schema.Definitions == nil {
+								result.Schema.Definitions = make(map[string]*schema.Schema)
+							}
+							for defName, defSchema := range dependencyResult.Schema.Definitions {
+								log.Debugf("Copying definition '%s' from dependency %s to parent %s", defName, dep.Name, result.Chart.Name)
+								result.Schema.Definitions[defName] = defSchema
+							}
+						}
 
 						if dep.Alias != "" {
 							result.Schema.Properties[dep.Alias] = &depSchema

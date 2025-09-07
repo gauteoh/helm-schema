@@ -21,7 +21,7 @@ type Result struct {
 }
 
 func Worker(
-	dryRun, uncomment, addSchemaReference, keepFullComment, helmDocsCompatibilityMode, dontRemoveHelmDocsPrefix, dontAddGlobal bool,
+	dryRun, uncomment, addSchemaReference, keepFullComment, helmDocsCompatibilityMode, dontRemoveHelmDocsPrefix, dontAddGlobal, resolve bool,
 	valueFileNames []string,
 	skipAutoGenerationConfig *SkipAutoGenerationConfig,
 	outFile string,
@@ -117,7 +117,13 @@ func Worker(
 			continue
 		}
 
-		result.Schema = *YamlToSchema(valuesPath, &values, keepFullComment, helmDocsCompatibilityMode, dontRemoveHelmDocsPrefix, dontAddGlobal, skipAutoGenerationConfig, nil)
+		schema, err := YamlToSchema(valuesPath, &values, keepFullComment, helmDocsCompatibilityMode, dontRemoveHelmDocsPrefix, dontAddGlobal, resolve, skipAutoGenerationConfig, nil)
+		if err != nil {
+			result.Errors = append(result.Errors, err)
+			results <- result
+			continue
+		}
+		result.Schema = *schema
 
 		results <- result
 	}
